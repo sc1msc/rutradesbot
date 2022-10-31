@@ -3,7 +3,19 @@ from bs4 import BeautifulSoup
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
+import ssl
 
+titles = []
+links = []
+vin_codes = []
+prices = []
+lot_types = []
+max_pages = 100
+page = 0
+AUTODOC = 'https://catalogoriginal.autodoc.ru/api/catalogs/original/cars/'
+MODS = "/modifications"
+# time markers
+time_page = []
 
 def get_vin(lot_link):
     lot_page = BeautifulSoup(requests.get(lot_link).text, 'lxml')
@@ -16,17 +28,43 @@ def get_vin(lot_link):
         vin_code = ''
     return (vin_code)
 
-titles = []
-links = []
-vin_codes = []
-prices = []
-lot_types = []
-max_pages = 100
-page = 0
-
-# time markers
-time_page = []
-
+# getting car info by VIN function
+def get_car_by_vin(vin):
+    url = AUTODOC+vin+MODS
+    ssl._create_default_https_context = ssl._create_unverified_context
+    carbrand = ""
+    carname = ""
+    carproddate = ""
+    caragg = ""
+    try:
+        res = requests.get(url)
+        if res.status_code == 200:
+            car = res.json()['commonAttributes']
+            for elem in car:
+                if elem['key'] == "Brand":
+                    carbrand = elem['value']
+                if elem['key'] == "Name":
+                    carname = elem['value']
+                if elem['key'] == "Date":
+                    carproddate = elem['value']
+                if elem['key'] == "aggregates":
+                    caragg = elem['value']
+    except:
+        try:
+            car = res.json()['specificAttributes'][0]
+            car = car['attributes']
+            for elem in car:
+                if elem['key'] == "Brand":
+                    carbrand = elem['value']
+                if elem['key'] == "Model":
+                    carname = elem['value']
+                if elem['key'] == "Year":
+                    carproddate = elem['value']
+                caragg = ''
+        except AttributeError as err:
+            print(err)
+        pass
+    return [carbrand, carname, carproddate, caragg]
 
 for page in range(max_pages):
 
@@ -34,9 +72,8 @@ for page in range(max_pages):
     time_page.append(time.time())
 
     url = 'https://xn----etbpba5admdlad.xn--p1ai/search?regions%5B0%5D=77&trades-section=bankrupt&categorie_childs' \
-          '%5B0%5D=2&page=' + str(page)
+          '%5B0%5D=2&page=' + str(page + 1)
     raw = requests.get(url)
-
     soup = BeautifulSoup(raw.text, 'lxml')
     lots = soup.findAll('div', class_='lot-card')
     page_links = []
@@ -52,7 +89,7 @@ for page in range(max_pages):
             lot_price = lot.find('p', class_='price__text').text
             lot_type = lot.find('a', class_='js-bidding-step-open').get('data-tooltip')
 
-            titles.append(lot_title.replace('\n', ''))
+            titles.append(lot_title.replace('\n', '').strip())
             links.append(lot_link)
             page_links.append(lot_link)
             prices.append(lot_price)
@@ -71,25 +108,12 @@ for page in range(max_pages):
         time_page[page] = abs(time_page[page])
         break
 
-
 # average time to process one page
 import numpy
 print(time_page)
 print('avg page time ' + str(numpy.average(time_page)))
 
-# creating dataframe
-# lots_df = pandas.DataFrame(
-#     {'title': titles,
-#      'price': prices,
-#      'link': links,
-#      'type': lot_types,
-#      'vin': vin_codes,
-#      }
-# )
-#
-# lots_df.to_csv(r'C:\Users\Adm\Documents\tradeparcer\lots', encoding='utf-8-sig')
-
-# list of lists for google sheets
+# creating list of lists for google sheets
 lots_list = []
 for i in range(len(titles)):
     lots_list.append([titles[i], prices[i], links[i], lot_types[i], vin_codes[i]])
@@ -97,11 +121,9 @@ for i in range(len(titles)):
 # exporting data to google sheets
 import httplib2
 from oauth2client.service_account import ServiceAccountCredentials
-
 CREDENTIALS_FILE = 'tradesbot-366711-6c4339e84a44.json'
 spreadsheet_id = '1NhMWsJ-BkPILhM8V3wLjIWN_DyJlVcOn_55a9TKrjWw'
-
-# reading key from local file
+# reading key from the local file
 credentials = ServiceAccountCredentials.from_json_keyfile_name(
     CREDENTIALS_FILE,
     ['https://www.googleapis.com/auth/spreadsheets',
@@ -114,7 +136,6 @@ service = discovery.build('sheets', 'v4', credentials=credentials)
 # clearing the sheet
 range_ = 'A1:Z1000'
 clear_values_request_body = {
-
 }
 request = service.spreadsheets().values().clear(spreadsheetId=spreadsheet_id, range=range_, body=clear_values_request_body)
 response = request.execute()
@@ -124,6 +145,27 @@ batch_update_values_request_body = {
     'value_input_option': 'USER_ENTERED',
     'data': [
         {'range': 'A:E',
+         'majorDimension': 'ROWS',
+         'values': lots_list,
+         }
+    ],
+}
+request = service.spreadsheets().values().batchUpdate(spreadsheetId=spreadsheet_id, body=batch_update_values_request_body)
+response = request.execute()
+
+lots_list = []
+start = time.time()
+with ThreadPoolExecutor(16) as executor:
+    for result in executor.map(get_car_by_vin, vin_codes):
+        lots_list.append(result)
+executor.shutdown()
+end = time.time()
+print('time for getting car data from autodoc: ', str(end - start))
+
+batch_update_values_request_body = {
+    'value_input_option': 'USER_ENTERED',
+    'data': [
+        {'range': 'F:I',
          'majorDimension': 'ROWS',
          'values': lots_list,
 
